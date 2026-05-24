@@ -1,6 +1,7 @@
 import io
 import re
 import csv
+from datetime import datetime
 
 import fitz
 import requests
@@ -345,6 +346,34 @@ if st.button("▶ PPTXを生成", type="primary", use_container_width=True):
         except Exception as e:
             st.error(f"PPTX生成エラー: {e}")
             st.stop()
+
+    # 保管庫に保存
+    if "archive" not in st.session_state:
+        st.session_state.archive = []
+    csv_fname = csv_file.name if csv_file else None
+
+    def blocks_preview(blocks):
+        return "".join(b["value"] if b["type"] == "固定" else f"[{b['value']}列]" for b in blocks)
+
+    st.session_state.archive.append({
+        "type": "pptx",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "filename": "barcode_labels.pptx",
+        "data_source": f"Google Sheets: {use_url}" if use_url else f"CSV: {csv_fname}",
+        "settings": {
+            "1行目テキスト": blocks_preview(blocks_line1),
+            "2行目テキスト": blocks_preview(blocks_snapshot),
+            "商品コード列": code_col,
+            "ページ幅(mm)": int(page_w_mm),
+            "ページ高さ(mm)": int(page_h_mm),
+            "白塗り高さ(pt)": int(white_box_pt),
+            "フォントサイズ(pt)": int(font_pt),
+        },
+        "matched_count": len(matched),
+        "pptx_bytes": pptx_bytes,
+        "csv_bytes": use_csv,
+        "csv_filename": csv_fname,
+    })
 
     st.download_button(
         label="⬇ PPTXをダウンロード",

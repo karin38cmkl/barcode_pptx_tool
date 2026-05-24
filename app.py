@@ -2,6 +2,7 @@ import io
 import csv
 import requests
 import re
+from datetime import datetime
 import streamlit as st
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas as rl_canvas
@@ -190,6 +191,28 @@ if st.button("▶ バーコードPDFを生成", type="primary", use_container_wi
         except Exception as e:
             st.error(f"PDF生成エラー: {e}")
             st.stop()
+
+    # 保管庫に保存
+    if "archive" not in st.session_state:
+        st.session_state.archive = []
+    csv_fname = csv_file.name if csv_file else None
+    st.session_state.archive.append({
+        "type": "barcode_pdf",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "filename": "barcodes.pdf",
+        "data_source": f"Google Sheets: {use_url}" if use_url else f"CSV: {csv_fname}",
+        "settings": {
+            "商品コード列": col_code,
+            "商品名列": col_name,
+            "バーコード番号列": col_barcode,
+            "ヘッダー行数": int(header_rows),
+        },
+        "item_count": len(data),
+        "pages": pages,
+        "pdf_bytes": pdf_bytes,
+        "csv_bytes": use_csv,
+        "csv_filename": csv_fname,
+    })
 
     st.download_button(
         label="⬇ バーコードPDFをダウンロード",
