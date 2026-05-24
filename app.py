@@ -1,105 +1,38 @@
 import io
-import re
 import csv
-
-import fitz
 import requests
+import re
 import streamlit as st
-from PIL import Image
-from lxml import etree
-from pptx import Presentation
-from pptx.util import Mm, Pt
-from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
-from pptx.oxml.ns import qn
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas as rl_canvas
+from reportlab.graphics.barcode import createBarcodeDrawing
+from reportlab.graphics import renderPDF
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfbase import pdfmetrics
 
-# ─── ページ設定 ───────────────────────────────────────────
-st.set_page_config(page_title="バーコードPPTX生成ツール", layout="wide")
-st.title("バーコードラベル PPTX生成ツール")
+# ─── 日本語フォント ────────────────────────────────────────
+pdfmetrics.registerFont(UnicodeCIDFont('HeiseiKakuGo-W5'))
+FONT = 'HeiseiKakuGo-W5'
 
-# ─── セッションステート初期化 ───────────────────────────────
-if "blocks_line1" not in st.session_state:
-    st.session_state.blocks_line1 = [
-        {"type": "固定", "value": "MimoRhea(みもれあ) 29×29"},
-    ]
-
-if "blocks" not in st.session_state:
-    st.session_state.blocks = [
-        {"type": "変数", "value": "K"},
-        {"type": "固定", "value": "_"},
-        {"type": "変数", "value": "H"},
-        {"type": "固定", "value": "("},
-        {"type": "変数", "value": "G"},
-        {"type": "固定", "value": ")_"},
-        {"type": "変数", "value": "L"},
-    ]
-
-# ─── サイドバー設定 ────────────────────────────────────────
-st.sidebar.header("設定")
-
-def block_editor(key: str, label: str):
-    """変数/固定ブロックエディタを描画し、削除・追加を処理する"""
-    st.sidebar.subheader(label)
-    st.sidebar.caption("変数＝スプシの列、固定＝そのまま出力するテキスト")
-
-    blocks = st.session_state[key]
-    delete_idx = None
-
-    for i, block in enumerate(blocks):
-        c1, c2, c3 = st.sidebar.columns([2, 3, 1])
-        new_type = c1.selectbox(
-            "", ["変数", "固定"],
-            index=0 if block["type"] == "変数" else 1,
-            key=f"{key}_type_{i}",
-            label_visibility="collapsed"
-        )
-        new_val = c2.text_input(
-            "", block["value"],
-            key=f"{key}_val_{i}",
-            label_visibility="collapsed",
-            placeholder="列名(例:K)" if new_type == "変数" else "固定テキスト"
-        )
-        if c3.button("✕", key=f"{key}_del_{i}"):
-            delete_idx = i
-        blocks[i]["type"] = new_type
-        blocks[i]["value"] = new_val
-
-    if delete_idx is not None:
-        blocks.pop(delete_idx)
-        st.rerun()
-
-    add1, add2 = st.sidebar.columns(2)
-    if add1.button("＋ 変数", key=f"{key}_add_var"):
-        blocks.append({"type": "変数", "value": ""})
-        st.rerun()
-    if add2.button("＋ 固定", key=f"{key}_add_fix"):
-        blocks.append({"type": "固定", "value": ""})
-        st.rerun()
-
-    preview = "".join(
-        b["value"] if b["type"] == "固定" else f"[{b['value']}列]"
-        for b in blocks
-    )
-    st.sidebar.caption(f"プレビュー: {preview}")
-
-block_editor("blocks_line1", "1行目テキスト構成")
-st.sidebar.divider()
-block_editor("blocks", "2行目テキスト構成")
-
-st.sidebar.divider()
-
-# ファイル名照合用の商品コード列
-code_col = st.sidebar.text_input("商品コード列（ファイル名照合用）", "K",
-                                  help="画像ファイル名(A-01など)と照合するための列")
-header_rows = st.sidebar.number_input("ヘッダー行数（スキップ行数）", min_value=0, max_value=5, value=1)
-
-st.sidebar.subheader("ページ・デザイン設定")
-page_w_mm = st.sidebar.number_input("ページ幅 (mm)", value=400, min_value=50, max_value=1000)
-page_h_mm = st.sidebar.number_input("ページ高さ (mm)", value=200, min_value=50, max_value=1000)
-white_box_pt = st.sidebar.number_input("白塗り高さ (pt)", value=193, min_value=10, max_value=500)
-font_pt = st.sidebar.number_input("フォントサイズ (pt)", value=60, min_value=8, max_value=200)
-scale = st.sidebar.slider("画像解像度 (PDF拡大率)", min_value=2, max_value=10, value=7,
-                          help="7 = 700%相当。大きいほど高画質だが処理が遅い")
+# ─── 元PDFと同一の寸法 ────────────────────────────────────
+# 実測値: 5列×13行, 左マージン22.6pt, 上マージン40.0pt
+PAGE_W, PAGE_H = A4          # 595.28 × 841.89 pt
+COLS           = 5
+ROWS_PER_PAGE  = 13
+MARGIN_LEFT    = 22.6        # pt
+MARGIN_TOP     = 40.0        # pt（ページ上端からの距離）
+CELL_W         = 115.4       # pt（列間隔）
+CELL_H         = 60.0        # pt（行間隔）
+# 元PDFから実測した値
+CONTENT_W      = 87.9        # テキストブロック幅（セル内コンテンツ幅）
+BC_WIDTH       = 60.5        # バーコードバー実幅（実測: 60.46pt）
+BC_HEIGHT      = 18.0        # バーコードバー高さ（実測: 18.00pt）
+TEXT_BLOCK_H   = 11.6        # 2行テキストブロック高さ（実測: 11.6pt）
+GAP_TEXT_BC    = 2.56        # テキスト下端〜バーコード上端（実測: 2.56pt）
+GAP_BC_NUM     = 1.12        # バーコード下端〜番号テキスト上端（実測: 1.12pt）
+NUM_BLOCK_H    = 6.5         # 番号テキストブロック高さ（実測: 6.5pt）
+FONT_TEXT_PT   = 5.5         # 商品コード・商品名フォントサイズ
+FONT_NUM_PT    = 7.0         # バーコード番号フォントサイズ
 
 # ─── ヘルパー関数 ──────────────────────────────────────────
 
@@ -111,255 +44,158 @@ def col_letter_to_index(letter: str) -> int:
     return idx - 1
 
 
-def make_filename(code: str) -> str:
-    parts = code.split('_')
-    if len(parts) >= 2:
-        return f"{parts[0][0]}-{parts[1]}"
-    return code
+def fit_text(c, text: str, font: str, size: float, max_w: float) -> str:
+    while len(text) > 1 and c.stringWidth(text, font, size) > max_w:
+        text = text[:-1]
+    return text
 
 
-def generate_line2(row: list, blocks: list) -> str:
-    result = ""
-    for block in blocks:
-        if block["type"] == "固定":
-            result += block["value"]
-        else:
-            idx = col_letter_to_index(block["value"])
-            result += row[idx].strip() if len(row) > idx else ""
-    return result
+def draw_cell(c, col: int, row_on_page: int, code: str, name: str, barcode_num: str):
+    cell_x     = MARGIN_LEFT + col * CELL_W
+    cell_y_top = PAGE_H - MARGIN_TOP - row_on_page * CELL_H
+    center_x   = cell_x + CONTENT_W / 2
+    bc_left    = cell_x + (CONTENT_W - BC_WIDTH) / 2   # バーコードをセル内中央に配置
 
+    # 1行目：商品コード
+    c.setFont(FONT, FONT_TEXT_PT)
+    y_line1 = cell_y_top - TEXT_BLOCK_H * 0.45
+    c.drawCentredString(center_x, y_line1, fit_text(c, code, FONT, FONT_TEXT_PT, CONTENT_W))
 
-def remove_shadow(shape):
-    sp = shape._element
-    spPr = sp.find(qn('p:spPr'))
-    if spPr is None:
-        spPr = sp.find('spPr')
-    if spPr is not None:
-        for el in spPr.findall(qn('a:effectLst')):
-            spPr.remove(el)
-        etree.SubElement(spPr, qn('a:effectLst'))
+    # 2行目：商品名
+    y_line2 = cell_y_top - TEXT_BLOCK_H
+    c.drawCentredString(center_x, y_line2, fit_text(c, name, FONT, FONT_TEXT_PT, CONTENT_W))
 
-
-def add_textbox(slide, text, left, top, width, height, font_pt, bold=True):
-    txBox = slide.shapes.add_textbox(left, top, width, height)
-    tf = txBox.text_frame
-    tf.word_wrap = False
-    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-    p = tf.paragraphs[0]
-    p.alignment = PP_ALIGN.CENTER
-    r = p.add_run()
-    r.text = text
-    r.font.bold = bold
-    r.font.size = Pt(font_pt)
-    r.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
-    remove_shadow(txBox)
-    return txBox
-
-
-def extract_barcodes_from_pdf(pdf_bytes: bytes, scale: int) -> dict:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    results = {}
-
-    for page in doc:
-        mat = fitz.Matrix(scale, scale)
-        pix = page.get_pixmap(matrix=mat)
-        page_img = Image.open(io.BytesIO(pix.tobytes('png')))
-        blocks = page.get_text('blocks')
-
-        product_blocks, barcode_num_blocks = [], []
-        for b in blocks:
-            text = b[4].strip()
-            first_line = text.split('\n')[0].strip()
-            if re.match(r'^[A-Z]\d+_\d+_\d+x\d+', first_line):
-                product_blocks.append(b)
-            elif re.match(r'^\d{10,15}$', text.replace('\n', '')):
-                barcode_num_blocks.append(b)
-
-        for pb in product_blocks:
-            first_line = pb[4].strip().split('\n')[0].strip()
-            filename = make_filename(first_line)
-            px0, py0, px2, py2 = pb[0], pb[1], pb[2], pb[3]
-            pc = (px0 + px2) / 2
-
-            matched_nb, min_dist = None, float('inf')
-            for nb in barcode_num_blocks:
-                nc = (nb[0] + nb[2]) / 2
-                if nb[1] > py0 and abs(nc - pc) < 30:
-                    dist = nb[1] - py2
-                    if dist < min_dist:
-                        min_dist = dist
-                        matched_nb = nb
-
-            if matched_nb is None:
-                continue
-
-            cropped = page_img.crop((
-                int(min(px0, matched_nb[0]) - 2) * scale,
-                int(py0 - 2) * scale,
-                int(max(px2, matched_nb[2]) + 2) * scale,
-                int(matched_nb[3] + 2) * scale,
-            ))
-            results[filename] = cropped
-
-    doc.close()
-    return results
-
-
-def load_spreadsheet_data(url, csv_bytes, code_col_idx,
-                          blocks_line1, blocks_line2, header_rows) -> dict:
-    """{code: (line1_text, line2_text)} を返す"""
-    if url:
-        match = re.search(r'/spreadsheets/d/([a-zA-Z0-9_-]+)', url)
-        if not match:
-            st.error("Google SheetsのURLが正しくありません")
-            return {}
-        sheet_id = match.group(1)
-        export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-        resp = requests.get(export_url, allow_redirects=True, timeout=30)
-        rows = list(csv.reader(io.StringIO(resp.content.decode('utf-8'))))
-    elif csv_bytes:
-        rows = list(csv.reader(io.StringIO(csv_bytes.decode('utf-8'))))
-    else:
-        return {}
-
-    data = {}
-    for row in rows[header_rows:]:
-        code = row[code_col_idx].strip() if len(row) > code_col_idx else ''
-        if code and code != '-':
-            data[code] = (
-                generate_line2(row, blocks_line1),
-                generate_line2(row, blocks_line2),
+    # バーコード（テキスト下端から GAP_TEXT_BC 空けて配置、幅は BC_WIDTH で中央寄せ）
+    bc_bottom = cell_y_top - TEXT_BLOCK_H - GAP_TEXT_BC - BC_HEIGHT
+    if barcode_num.strip():
+        try:
+            d = createBarcodeDrawing(
+                'EAN13',
+                value=barcode_num.strip()[:13].zfill(13),
+                width=BC_WIDTH,
+                height=BC_HEIGHT,
+                barHeight=BC_HEIGHT,
+                humanReadable=False,
+                quiet=0,
             )
-    return data
+            renderPDF.draw(d, c, bc_left, bc_bottom)
+        except Exception:
+            try:
+                d = createBarcodeDrawing(
+                    'Code128',
+                    value=barcode_num.strip(),
+                    width=BC_WIDTH,
+                    height=BC_HEIGHT,
+                    barHeight=BC_HEIGHT,
+                    humanReadable=False,
+                    quiet=0,
+                )
+                renderPDF.draw(d, c, bc_left, bc_bottom)
+            except Exception:
+                pass
+
+    # バーコード番号（バーコード下端から GAP_BC_NUM 空けて・大きめフォント）
+    y_num = bc_bottom - GAP_BC_NUM - NUM_BLOCK_H * 0.8
+    c.setFont(FONT, FONT_NUM_PT)
+    c.drawCentredString(center_x, y_num, barcode_num)
 
 
-def build_pptx(barcode_images, ss_data, page_w_mm, page_h_mm,
-               white_box_pt, font_pt) -> bytes:
-    prs = Presentation()
-    prs.slide_width = Mm(page_w_mm)
-    prs.slide_height = Mm(page_h_mm)
-    blank = prs.slide_layouts[6]
-
-    white_h = Pt(white_box_pt)
-    half_h = white_h // 2
-
-    for code in sorted(barcode_images.keys()):
-        if code not in ss_data:
-            continue
-
-        img = barcode_images[code]
-        w_px, h_px = img.size
-        img_h_mm = page_w_mm * h_px / w_px
-
-        slide = prs.slides.add_slide(blank)
-
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=95)
-        buf.seek(0)
-        slide.shapes.add_picture(buf, Mm(0), Mm(0), Mm(page_w_mm), Mm(img_h_mm))
-
-        rect = slide.shapes.add_shape(1, Mm(0), Mm(0), Mm(page_w_mm), white_h)
-        rect.fill.solid()
-        rect.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-        rect.line.fill.background()
-        remove_shadow(rect)
-
-        line1_text, line2_text = ss_data[code]
-        add_textbox(slide, line1_text, Mm(0), Mm(0),   Mm(page_w_mm), half_h, font_pt)
-        add_textbox(slide, line2_text, Mm(0), half_h,  Mm(page_w_mm), half_h, font_pt)
-
+def generate_pdf(data: list) -> bytes:
     buf = io.BytesIO()
-    prs.save(buf)
+    c = rl_canvas.Canvas(buf, pagesize=A4)
+    per_page = COLS * ROWS_PER_PAGE
+
+    for i, (code, name, barcode_num) in enumerate(data):
+        if i > 0 and i % per_page == 0:
+            c.showPage()
+        cell_idx = i % per_page
+        draw_cell(c, cell_idx % COLS, cell_idx // COLS, code, name, barcode_num)
+
+    c.save()
     return buf.getvalue()
 
 
-# ─── メイン UI ─────────────────────────────────────────────
+def load_csv_rows(url=None, csv_bytes=None) -> list:
+    if url:
+        m = re.search(r'/spreadsheets/d/([a-zA-Z0-9_-]+)', url)
+        if not m:
+            st.error("Google SheetsのURLが正しくありません")
+            return []
+        export_url = f"https://docs.google.com/spreadsheets/d/{m.group(1)}/export?format=csv"
+        resp = requests.get(export_url, allow_redirects=True, timeout=30)
+        return list(csv.reader(io.StringIO(resp.content.decode('utf-8'))))
+    elif csv_bytes:
+        try:
+            return list(csv.reader(io.StringIO(csv_bytes.decode('utf-8-sig'))))
+        except Exception:
+            return list(csv.reader(io.StringIO(csv_bytes.decode('shift-jis'))))
+    return []
 
-col1, col2 = st.columns(2)
 
-with col1:
-    st.subheader("① PDFをアップロード")
-    pdf_file = st.file_uploader("バーコードPDF", type=["pdf"])
+# ─── UI ───────────────────────────────────────────────────
+st.set_page_config(page_title="バーコード発行", layout="wide")
+st.title("バーコード発行")
+st.caption("元PDFと同一レイアウト（A4・5列×13行）でバーコードPDFを生成します")
 
-with col2:
-    st.subheader("② スプレッドシートデータ")
-    tab_url, tab_csv = st.tabs(["Google Sheets URL", "CSVアップロード"])
-    with tab_url:
-        sheets_url = st.text_input("URLを貼り付け",
-                                   placeholder="https://docs.google.com/spreadsheets/d/...")
-    with tab_csv:
-        csv_file = st.file_uploader("CSVファイル", type=["csv"])
+with st.expander("列設定", expanded=False):
+    c1, c2, c3, c4 = st.columns(4)
+    col_code    = c1.text_input("商品コード列",    "A")
+    col_name    = c2.text_input("商品名列",        "B")
+    col_barcode = c3.text_input("バーコード番号列", "C")
+    header_rows = c4.number_input("ヘッダー行数",  min_value=0, max_value=10, value=1)
+
+tab_csv, tab_url = st.tabs(["CSVアップロード", "Google Sheets URL"])
+with tab_csv:
+    csv_file = st.file_uploader("CSVファイル", type=["csv"])
+with tab_url:
+    sheets_url = st.text_input("URLを貼り付け",
+                               placeholder="https://docs.google.com/spreadsheets/d/...")
 
 st.divider()
 
-if st.button("▶ PPTXを生成", type="primary", use_container_width=True):
-    if not pdf_file:
-        st.error("PDFをアップロードしてください")
-        st.stop()
-
+if st.button("▶ バーコードPDFを生成", type="primary", use_container_width=True):
     use_url = sheets_url.strip() if sheets_url else None
     use_csv = csv_file.read() if csv_file else None
 
     if not use_url and not use_csv:
-        st.error("スプレッドシートのURLまたはCSVを指定してください")
+        st.error("CSVまたはGoogle SheetsのURLを指定してください")
         st.stop()
 
-    code_col_idx    = col_letter_to_index(code_col)
-    blocks_line1    = [dict(b) for b in st.session_state.blocks_line1]
-    blocks_snapshot = [dict(b) for b in st.session_state.blocks]
+    with st.spinner("データ読み込み中..."):
+        rows = load_csv_rows(url=use_url, csv_bytes=use_csv)
 
-    with st.spinner("PDFからバーコード画像を切り出し中..."):
+    if not rows:
+        st.error("データを読み込めませんでした")
+        st.stop()
+
+    ci = col_letter_to_index(col_code)
+    ni = col_letter_to_index(col_name)
+    bi = col_letter_to_index(col_barcode)
+
+    data = []
+    for row in rows[int(header_rows):]:
+        code    = row[ci].strip() if len(row) > ci else ''
+        name    = row[ni].strip() if len(row) > ni else ''
+        barcode = row[bi].strip() if len(row) > bi else ''
+        if code or barcode:
+            data.append((code, name, barcode))
+
+    st.success(f"{len(data)}件 読み込み完了")
+
+    with st.spinner(f"PDF生成中（{len(data)}件）..."):
         try:
-            barcode_images = extract_barcodes_from_pdf(pdf_file.read(), scale)
-            st.success(f"バーコード画像: {len(barcode_images)}件 切り出し完了")
+            pdf_bytes = generate_pdf(data)
+            pages = -(-len(data) // (COLS * ROWS_PER_PAGE))
+            st.success(f"PDF生成完了: {len(data)}件 / {pages}ページ")
         except Exception as e:
-            st.error(f"PDF処理エラー: {e}")
-            st.stop()
-
-    with st.spinner("スプレッドシートデータを読み込み中..."):
-        try:
-            ss_data = load_spreadsheet_data(use_url, use_csv, code_col_idx,
-                                            blocks_line1, blocks_snapshot, int(header_rows))
-            st.success(f"スプレッドシート: {len(ss_data)}件 読み込み完了")
-        except Exception as e:
-            st.error(f"スプレッドシート読み込みエラー: {e}")
-            st.stop()
-
-    matched  = set(barcode_images.keys()) & set(ss_data.keys())
-    only_img = set(barcode_images.keys()) - set(ss_data.keys())
-    only_ss  = set(ss_data.keys()) - set(barcode_images.keys())
-
-    if only_img:
-        st.warning(f"スプシにデータなし（スキップ）: {sorted(only_img)}")
-    if only_ss:
-        st.warning(f"PDF画像なし（スキップ）: {sorted(only_ss)}")
-
-    with st.spinner(f"PPTX生成中（{len(matched)}枚）..."):
-        try:
-            pptx_bytes = build_pptx(
-                barcode_images, ss_data,
-                int(page_w_mm), int(page_h_mm),
-                int(white_box_pt), int(font_pt)
-            )
-            st.success(f"PPTX生成完了: {len(matched)}スライド")
-        except Exception as e:
-            st.error(f"PPTX生成エラー: {e}")
+            st.error(f"PDF生成エラー: {e}")
             st.stop()
 
     st.download_button(
-        label="⬇ PPTXをダウンロード",
-        data=pptx_bytes,
-        file_name="barcode_labels.pptx",
-        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        label="⬇ バーコードPDFをダウンロード",
+        data=pdf_bytes,
+        file_name="barcodes.pdf",
+        mime="application/pdf",
         use_container_width=True,
-        type="primary"
+        type="primary",
     )
-
-    st.subheader("プレビュー（最初の3件）")
-    preview_codes = sorted(matched)[:3]
-    cols = st.columns(3)
-    for i, code in enumerate(preview_codes):
-        with cols[i]:
-            st.image(barcode_images[code], caption=code, use_container_width=True)
-            l1, l2 = ss_data[code]
-            st.caption(f"{l1} / {l2}")
