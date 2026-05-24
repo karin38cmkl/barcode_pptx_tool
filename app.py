@@ -18,6 +18,11 @@ st.set_page_config(page_title="バーコードPPTX生成ツール", layout="wide
 st.title("バーコードラベル PPTX生成ツール")
 
 # ─── セッションステート初期化 ───────────────────────────────
+if "blocks_line1" not in st.session_state:
+    st.session_state.blocks_line1 = [
+        {"type": "固定", "value": "MimoRhea(みもれあ) 29×29"},
+    ]
+
 if "blocks" not in st.session_state:
     st.session_state.blocks = [
         {"type": "変数", "value": "K"},
@@ -32,53 +37,54 @@ if "blocks" not in st.session_state:
 # ─── サイドバー設定 ────────────────────────────────────────
 st.sidebar.header("設定")
 
-line1_text = st.sidebar.text_input("1行目テキスト（固定）", "MimoRhea(みもれあ) 29×29")
+def block_editor(key: str, label: str):
+    """変数/固定ブロックエディタを描画し、削除・追加を処理する"""
+    st.sidebar.subheader(label)
+    st.sidebar.caption("変数＝スプシの列、固定＝そのまま出力するテキスト")
 
-st.sidebar.subheader("2行目テキスト構成")
-st.sidebar.caption("変数＝スプシの列、固定＝そのまま出力するテキスト")
+    blocks = st.session_state[key]
+    delete_idx = None
 
-# ブロック一覧表示
-delete_idx = None
-for i, block in enumerate(st.session_state.blocks):
-    c1, c2, c3 = st.sidebar.columns([2, 3, 1])
-    new_type = c1.selectbox(
-        "", ["変数", "固定"],
-        index=0 if block["type"] == "変数" else 1,
-        key=f"type_{i}",
-        label_visibility="collapsed"
+    for i, block in enumerate(blocks):
+        c1, c2, c3 = st.sidebar.columns([2, 3, 1])
+        new_type = c1.selectbox(
+            "", ["変数", "固定"],
+            index=0 if block["type"] == "変数" else 1,
+            key=f"{key}_type_{i}",
+            label_visibility="collapsed"
+        )
+        new_val = c2.text_input(
+            "", block["value"],
+            key=f"{key}_val_{i}",
+            label_visibility="collapsed",
+            placeholder="列名(例:K)" if new_type == "変数" else "固定テキスト"
+        )
+        if c3.button("✕", key=f"{key}_del_{i}"):
+            delete_idx = i
+        blocks[i]["type"] = new_type
+        blocks[i]["value"] = new_val
+
+    if delete_idx is not None:
+        blocks.pop(delete_idx)
+        st.rerun()
+
+    add1, add2 = st.sidebar.columns(2)
+    if add1.button("＋ 変数", key=f"{key}_add_var"):
+        blocks.append({"type": "変数", "value": ""})
+        st.rerun()
+    if add2.button("＋ 固定", key=f"{key}_add_fix"):
+        blocks.append({"type": "固定", "value": ""})
+        st.rerun()
+
+    preview = "".join(
+        b["value"] if b["type"] == "固定" else f"[{b['value']}列]"
+        for b in blocks
     )
-    new_val = c2.text_input(
-        "", block["value"],
-        key=f"val_{i}",
-        label_visibility="collapsed",
-        placeholder="列名(例:K)" if block["type"] == "変数" else "固定テキスト"
-    )
-    if c3.button("✕", key=f"del_{i}"):
-        delete_idx = i
-    st.session_state.blocks[i]["type"] = new_type
-    st.session_state.blocks[i]["value"] = new_val
+    st.sidebar.caption(f"プレビュー: {preview}")
 
-if delete_idx is not None:
-    st.session_state.blocks.pop(delete_idx)
-    st.rerun()
-
-# 追加ボタン
-add1, add2 = st.sidebar.columns(2)
-if add1.button("＋ 変数"):
-    st.session_state.blocks.append({"type": "変数", "value": ""})
-    st.rerun()
-if add2.button("＋ 固定"):
-    st.session_state.blocks.append({"type": "固定", "value": ""})
-    st.rerun()
-
-# プレビュー
-preview_parts = []
-for b in st.session_state.blocks:
-    if b["type"] == "固定":
-        preview_parts.append(b["value"])
-    else:
-        preview_parts.append(f"[{b['value']}列]")
-st.sidebar.caption(f"プレビュー: {''.join(preview_parts)}")
+block_editor("blocks_line1", "1行目テキスト構成")
+st.sidebar.divider()
+block_editor("blocks", "2行目テキスト構成")
 
 st.sidebar.divider()
 
@@ -199,7 +205,9 @@ def extract_barcodes_from_pdf(pdf_bytes: bytes, scale: int) -> dict:
     return results
 
 
-def load_spreadsheet_data(url, csv_bytes, code_col_idx, blocks, header_rows) -> dict:
+def load_spreadsheet_data(url, csv_bytes, code_col_idx,
+                          blocks_line1, blocks_line2, header_rows) -> dict:
+    """{code: (line1_text, line2_text)} を返す"""
     if url:
         match = re.search(r'/spreadsheets/d/([a-zA-Z0-9_-]+)', url)
         if not match:
@@ -218,11 +226,14 @@ def load_spreadsheet_data(url, csv_bytes, code_col_idx, blocks, header_rows) -> 
     for row in rows[header_rows:]:
         code = row[code_col_idx].strip() if len(row) > code_col_idx else ''
         if code and code != '-':
-            data[code] = generate_line2(row, blocks)
+            data[code] = (
+                generate_line2(row, blocks_line1),
+                generate_line2(row, blocks_line2),
+            )
     return data
 
 
-def build_pptx(barcode_images, ss_data, line1, page_w_mm, page_h_mm,
+def build_pptx(barcode_images, ss_data, page_w_mm, page_h_mm,
                white_box_pt, font_pt) -> bytes:
     prs = Presentation()
     prs.slide_width = Mm(page_w_mm)
@@ -253,8 +264,9 @@ def build_pptx(barcode_images, ss_data, line1, page_w_mm, page_h_mm,
         rect.line.fill.background()
         remove_shadow(rect)
 
-        add_textbox(slide, line1,        Mm(0), Mm(0),   Mm(page_w_mm), half_h, font_pt)
-        add_textbox(slide, ss_data[code], Mm(0), half_h, Mm(page_w_mm), half_h, font_pt)
+        line1_text, line2_text = ss_data[code]
+        add_textbox(slide, line1_text, Mm(0), Mm(0),   Mm(page_w_mm), half_h, font_pt)
+        add_textbox(slide, line2_text, Mm(0), half_h,  Mm(page_w_mm), half_h, font_pt)
 
     buf = io.BytesIO()
     prs.save(buf)
@@ -292,7 +304,8 @@ if st.button("▶ PPTXを生成", type="primary", use_container_width=True):
         st.error("スプレッドシートのURLまたはCSVを指定してください")
         st.stop()
 
-    code_col_idx = col_letter_to_index(code_col)
+    code_col_idx    = col_letter_to_index(code_col)
+    blocks_line1    = [dict(b) for b in st.session_state.blocks_line1]
     blocks_snapshot = [dict(b) for b in st.session_state.blocks]
 
     with st.spinner("PDFからバーコード画像を切り出し中..."):
@@ -306,7 +319,7 @@ if st.button("▶ PPTXを生成", type="primary", use_container_width=True):
     with st.spinner("スプレッドシートデータを読み込み中..."):
         try:
             ss_data = load_spreadsheet_data(use_url, use_csv, code_col_idx,
-                                            blocks_snapshot, int(header_rows))
+                                            blocks_line1, blocks_snapshot, int(header_rows))
             st.success(f"スプレッドシート: {len(ss_data)}件 読み込み完了")
         except Exception as e:
             st.error(f"スプレッドシート読み込みエラー: {e}")
@@ -324,7 +337,7 @@ if st.button("▶ PPTXを生成", type="primary", use_container_width=True):
     with st.spinner(f"PPTX生成中（{len(matched)}枚）..."):
         try:
             pptx_bytes = build_pptx(
-                barcode_images, ss_data, line1_text,
+                barcode_images, ss_data,
                 int(page_w_mm), int(page_h_mm),
                 int(white_box_pt), int(font_pt)
             )
@@ -348,4 +361,5 @@ if st.button("▶ PPTXを生成", type="primary", use_container_width=True):
     for i, code in enumerate(preview_codes):
         with cols[i]:
             st.image(barcode_images[code], caption=code, use_container_width=True)
-            st.caption(ss_data[code])
+            l1, l2 = ss_data[code]
+            st.caption(f"{l1} / {l2}")
