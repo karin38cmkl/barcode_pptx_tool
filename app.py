@@ -196,10 +196,14 @@ if st.button("▶ バーコードPDFを生成", type="primary", use_container_wi
     if "archive" not in st.session_state:
         st.session_state.archive = []
     csv_fname = csv_file.name if csv_file else None
+
+    pdf_name_input = st.text_input("ファイル名（.pdf）", value="barcodes", key="pdf_filename")
+    pdf_filename = (pdf_name_input.strip() or "barcodes") + ".pdf"
+
     st.session_state.archive.append({
         "type": "barcode_pdf",
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "filename": "barcodes.pdf",
+        "filename": pdf_filename,
         "data_source": f"Google Sheets: {use_url}" if use_url else f"CSV: {csv_fname}",
         "settings": {
             "商品コード列": col_code,
@@ -217,7 +221,7 @@ if st.button("▶ バーコードPDFを生成", type="primary", use_container_wi
     st.download_button(
         label="⬇ バーコードPDFをダウンロード",
         data=pdf_bytes,
-        file_name="barcodes.pdf",
+        file_name=pdf_filename,
         mime="application/pdf",
         use_container_width=True,
         type="primary",

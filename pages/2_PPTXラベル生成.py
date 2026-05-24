@@ -358,7 +358,7 @@ if st.button("▶ PPTXを生成", type="primary", use_container_width=True):
     st.session_state.archive.append({
         "type": "pptx",
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "filename": "barcode_labels.pptx",
+        "filename": "barcode_labels.pptx",  # 後で上書き
         "data_source": f"Google Sheets: {use_url}" if use_url else f"CSV: {csv_fname}",
         "settings": {
             "1行目テキスト": blocks_preview(blocks_line1),
@@ -375,10 +375,14 @@ if st.button("▶ PPTXを生成", type="primary", use_container_width=True):
         "csv_filename": csv_fname,
     })
 
+    pptx_name_input = st.text_input("ファイル名（.pptx）", value="barcode_labels", key="pptx_filename")
+    pptx_filename = (pptx_name_input.strip() or "barcode_labels") + ".pptx"
+    st.session_state.archive[-1]["filename"] = pptx_filename
+
     st.download_button(
         label="⬇ PPTXをダウンロード",
         data=pptx_bytes,
-        file_name="barcode_labels.pptx",
+        file_name=pptx_filename,
         mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         use_container_width=True,
         type="primary"
